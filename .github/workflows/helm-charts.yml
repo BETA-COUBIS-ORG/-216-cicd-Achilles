@@ -2,9 +2,9 @@ name: helm-charts-ci
 
 on:
   push:
-    branches: [develop, main]
+    branches: [develop]
   pull_request:
-    branches: [develop, main]
+    branches: [develop]
   workflow_dispatch: {}
 
 concurrency:
@@ -36,65 +36,64 @@ jobs:
           if command -v helm >/dev/null 2>&1; then
             echo "==> Helm already installed:"
             helm version || true
-          else
-            echo "==> Helm not found. Installing Helm ${HELM_VERSION}..."
-            if command -v sudo >/dev/null 2>&1; then
-              sudo apt-get update -y
-              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl tar gzip
-              curl -fsSL -o /tmp/helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
-              tar -C /tmp -xzf /tmp/helm.tgz
-              sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
-            else
-              echo "==> sudo not available; installing Helm to \$HOME/bin"
-              mkdir -p "$HOME/bin"
-              export PATH="$HOME/bin:$PATH"
-              if command -v apt-get >/dev/null 2>&1; then
-                apt-get update -y || true
-                DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl tar gzip || true
-              fi
-              curl -fsSL -o /tmp/helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
-              tar -C /tmp -xzf /tmp/helm.tgz
-              install -m 0755 /tmp/linux-amd64/helm "$HOME/bin/helm"
-              echo "$HOME/bin" >> "$GITHUB_PATH"
-            fi
-            echo "==> Helm installed:"
-            helm version
+            exit 0
           fi
 
-      - name: Discover charts (FAIL if none exist)
+          echo "==> Helm not found. Installing Helm ${HELM_VERSION}..."
+          if command -v sudo >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl tar gzip
+            curl -fsSL -o /tmp/helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+            tar -C /tmp -xzf /tmp/helm.tgz
+            sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+          else
+            echo "==> sudo not available; installing Helm to \$HOME/bin"
+            mkdir -p "$HOME/bin"
+            echo "$HOME/bin" >> "$GITHUB_PATH"
+            curl -fsSL -o /tmp/helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+            tar -C /tmp -xzf /tmp/helm.tgz
+            install -m 0755 /tmp/linux-amd64/helm "$HOME/bin/helm"
+          fi
+
+          echo "==> Helm installed:"
+          helm version
+
+      - name: Debug workspace (optional but helpful)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "PWD=$(pwd)"
+          echo "GITHUB_WORKSPACE=${GITHUB_WORKSPACE}"
+          ls -la
+
+      - name: Helm lint (all charts) - FAIL if no charts exist
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p ci-artifacts
+          : > ci-artifacts/helm-lint.log
+
+          # Always (re)create chart-dirs.txt right here
           : > chart-dirs.txt
 
-          # Find Chart.yaml but ignore dependency charts inside */charts/*
+          
           find . -name Chart.yaml -not -path "*/charts/*" -print0 \
             | while IFS= read -r -d '' f; do dirname "$f"; done \
             | sort -u | tee chart-dirs.txt
 
           if [ ! -s chart-dirs.txt ]; then
-            echo "ERROR: No Chart.yaml found in repo. This repo must contain at least one Helm chart." | tee ci-artifacts/summary.log
-            : > ci-artifacts/helm-lint.log
-            : > ci-artifacts/helm-template.log
+            echo "ERROR: No Chart.yaml found in repo. At least one Helm chart is required." | tee -a ci-artifacts/helm-lint.log
             exit 1
           fi
 
-          echo "Found charts:"
-          cat chart-dirs.txt
-
-      - name: Helm lint (all charts)
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p ci-artifacts
-          : > ci-artifacts/helm-lint.log 
+          echo "Found charts:" | tee -a ci-artifacts/helm-lint.log
+          cat chart-dirs.txt | tee -a ci-artifacts/helm-lint.log
 
           while IFS= read -r d; do
             echo "------------------------------------------------------------" | tee -a ci-artifacts/helm-lint.log
             echo "==> helm lint: $d" | tee -a ci-artifacts/helm-lint.log
 
-            # If chart declares dependencies, build them
+
             if grep -qE '^[[:space:]]*dependencies:' "$d/Chart.yaml"; then
               echo "==> dependencies detected; running: helm dependency build $d" | tee -a ci-artifacts/helm-lint.log
               helm dependency build "$d" 2>&1 | tee -a ci-artifacts/helm-lint.log
@@ -103,12 +102,24 @@ jobs:
             helm lint "$d" 2>&1 | tee -a ci-artifacts/helm-lint.log
           done < chart-dirs.txt
 
-      - name: Helm template (dry validation)
+      - name: Helm template (dry validation) - FAIL if no charts exist
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p ci-artifacts
-          : > ci-artifacts/helm-template.log 
+          : > ci-artifacts/helm-template.log
+
+          # Always (re)create chart-dirs.txt right here too
+          : > chart-dirs.txt
+          find . -name Chart.yaml -not -path "*/charts/*" -print0 \
+            | while IFS= read -r -d '' f; do dirname "$f"; done \
+            | sort -u | tee chart-dirs.txt
+
+          if [ ! -s chart-dirs.txt ]; then
+            echo "ERROR: No Chart.yaml found in repo. At least one Helm chart is required." | tee -a ci-artifacts/helm-template.log
+            exit 1
+          fi
+
           while IFS= read -r d; do
             echo "------------------------------------------------------------" | tee -a ci-artifacts/helm-template.log
             echo "==> helm template: $d" | tee -a ci-artifacts/helm-template.log
