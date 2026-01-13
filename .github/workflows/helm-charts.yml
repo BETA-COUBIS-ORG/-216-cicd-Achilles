@@ -28,24 +28,40 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install tools (curl, git)
+      - name: Ensure Helm (use existing or install)
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl git
 
-      - name: Install Helm
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "==> Installing Helm ${HELM_VERSION}"
-          curl -fsSL -o /tmp/helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
-          tar -C /tmp -xzf /tmp/helm.tgz
-          sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
-          helm version
+          if command -v helm >/dev/null 2>&1; then
+            echo "==> Helm already installed:"
+            helm version || true
+          else
+            echo "==> Helm not found. Installing Helm ${HELM_VERSION}..."
+            if command -v sudo >/dev/null 2>&1; then
+              sudo apt-get update -y
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl tar gzip
+              curl -fsSL -o /tmp/helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+              tar -C /tmp -xzf /tmp/helm.tgz
+              sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+            else
+              echo "==> sudo not available; installing Helm to \$HOME/bin"
+              mkdir -p "$HOME/bin"
+              export PATH="$HOME/bin:$PATH"
+              if command -v apt-get >/dev/null 2>&1; then
+                apt-get update -y || true
+                DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl tar gzip || true
+              fi
+              curl -fsSL -o /tmp/helm.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+              tar -C /tmp -xzf /tmp/helm.tgz
+              install -m 0755 /tmp/linux-amd64/helm "$HOME/bin/helm"
+              echo "$HOME/bin" >> "$GITHUB_PATH"
+            fi
+            echo "==> Helm installed:"
+            helm version
+          fi
 
-      - name: Discover charts (always create chart-dirs.txt)
+      - name: Discover charts (FAIL if none exist)
         shell: bash
         run: |
           set -euo pipefail
@@ -58,31 +74,27 @@ jobs:
             | sort -u | tee chart-dirs.txt
 
           if [ ! -s chart-dirs.txt ]; then
-            echo "No Chart.yaml found. Nothing to lint/template." | tee ci-artifacts/summary.log
-          else
-            echo "Found charts:"
-            cat chart-dirs.txt
+            echo "ERROR: No Chart.yaml found in repo. This repo must contain at least one Helm chart." | tee ci-artifacts/summary.log
+            : > ci-artifacts/helm-lint.log
+            : > ci-artifacts/helm-template.log
+            exit 1
           fi
+
+          echo "Found charts:"
+          cat chart-dirs.txt
 
       - name: Helm lint (all charts)
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p ci-artifacts
-          : > ci-artifacts/helm-lint.log
-
-          # Safety: ensure the file exists even if Discover step was edited/removed later
-          : > chart-dirs.txt
-
-          if [ ! -s chart-dirs.txt ]; then
-            echo "No charts to lint (chart-dirs.txt empty). Skipping." | tee -a ci-artifacts/helm-lint.log
-            exit 0
-          fi
+          : > ci-artifacts/helm-lint.log 
 
           while IFS= read -r d; do
             echo "------------------------------------------------------------" | tee -a ci-artifacts/helm-lint.log
             echo "==> helm lint: $d" | tee -a ci-artifacts/helm-lint.log
 
+            # If chart declares dependencies, build them
             if grep -qE '^[[:space:]]*dependencies:' "$d/Chart.yaml"; then
               echo "==> dependencies detected; running: helm dependency build $d" | tee -a ci-artifacts/helm-lint.log
               helm dependency build "$d" 2>&1 | tee -a ci-artifacts/helm-lint.log
@@ -96,16 +108,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ci-artifacts
-          : > ci-artifacts/helm-template.log
-
-          # Safety: ensure the file exists even if Discover step was edited/removed later
-          : > chart-dirs.txt
-
-          if [ ! -s chart-dirs.txt ]; then
-            echo "No charts to template (chart-dirs.txt empty). Skipping." | tee -a ci-artifacts/helm-template.log
-            exit 0
-          fi
-
+          : > ci-artifacts/helm-template.log 
           while IFS= read -r d; do
             echo "------------------------------------------------------------" | tee -a ci-artifacts/helm-template.log
             echo "==> helm template: $d" | tee -a ci-artifacts/helm-template.log
