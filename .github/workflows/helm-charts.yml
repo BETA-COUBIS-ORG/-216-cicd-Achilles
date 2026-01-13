@@ -2,9 +2,10 @@ name: helm-charts-ci
 
 on:
   push:
-    branches: [main]
+    branches: [develop]
   pull_request:
-    branches: [main]
+    branches: [develop]
+  workflow_dispatch: {}
 
 concurrency:
   group: helm-charts-ci-${{ github.ref }}
@@ -13,8 +14,12 @@ concurrency:
 jobs:
   lint_and_template:
     name: Helm Lint + Template
-    runs-on: [self-hosted, Linux, X64, org-build]
-
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+      - org-build
+      - org-deploy
 
     env:
       HELM_VERSION: "v3.15.4"
@@ -40,24 +45,33 @@ jobs:
           sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
           helm version
 
-      - name: Discover charts
+      - name: Discover charts (create chart-dirs.txt, exit cleanly if none)
         shell: bash
         run: |
           set -euo pipefail
-          # Find Chart.yaml but ignore dependency charts inside */charts/*
-          mapfile -t CHART_DIRS < <(find . -name Chart.yaml -not -path "*/charts/*" -print0 \
-            | xargs -0 -n1 dirname | sort -u)
+          mkdir -p ci-artifacts
 
-          if [ "${#CHART_DIRS[@]}" -eq 0 ]; then
-            echo "No Chart.yaml found. Nothing to lint/template."
+          # Always create the file so later steps never fail on "No such file"
+          : > chart-dirs.txt
+
+          # Find Chart.yaml but ignore dependency charts inside */charts/*
+          while IFS= read -r -d '' f; do
+            dirname "$f"
+          done < <(find . -name Chart.yaml -not -path "*/charts/*" -print0) \
+            | sort -u | tee chart-dirs.txt
+
+          if [ ! -s chart-dirs.txt ]; then
+            echo "No Chart.yaml found. Nothing to lint/template. Exiting successfully." | tee ci-artifacts/summary.log
+            : > ci-artifacts/helm-lint.log
+            : > ci-artifacts/helm-template.log
             exit 0
           fi
 
-          printf "%s\n" "${CHART_DIRS[@]}" | tee chart-dirs.txt
           echo "Found charts:"
           cat chart-dirs.txt
 
       - name: Helm lint (all charts)
+        if: ${{ hashFiles('chart-dirs.txt') != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -68,7 +82,7 @@ jobs:
             echo "------------------------------------------------------------" | tee -a ci-artifacts/helm-lint.log
             echo "==> helm lint: $d" | tee -a ci-artifacts/helm-lint.log
 
-            # If chart declares dependencies, try to build them (best effort).
+            # If chart declares dependencies, build them
             if grep -qE '^[[:space:]]*dependencies:' "$d/Chart.yaml"; then
               echo "==> dependencies detected; running: helm dependency build $d" | tee -a ci-artifacts/helm-lint.log
               helm dependency build "$d" 2>&1 | tee -a ci-artifacts/helm-lint.log
@@ -78,6 +92,7 @@ jobs:
           done < chart-dirs.txt
 
       - name: Helm template (dry validation)
+        if: ${{ hashFiles('chart-dirs.txt') != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -88,8 +103,7 @@ jobs:
             echo "------------------------------------------------------------" | tee -a ci-artifacts/helm-template.log
             echo "==> helm template: $d" | tee -a ci-artifacts/helm-template.log
 
-            # Render templates with default values; fail if rendering fails.
-            # Use a deterministic release name/namespace for consistency.
+            # Render templates; fail if rendering fails, print errors
             helm template "ci-test" "$d" --namespace "default" 1>/dev/null 2>&1 \
               || (echo "ERROR: helm template failed for $d" | tee -a ci-artifacts/helm-template.log; \
                   helm template "ci-test" "$d" --namespace "default" 2>&1 | tee -a ci-artifacts/helm-template.log; \
