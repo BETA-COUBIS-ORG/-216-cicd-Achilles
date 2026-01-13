@@ -2,9 +2,9 @@ name: helm-charts-ci
 
 on:
   push:
-    branches: [develop]
+    branches: [main]
   pull_request:
-    branches: [develop]
+    branches: [main]
 
 concurrency:
   group: helm-charts-ci-${{ github.ref }}
@@ -13,12 +13,8 @@ concurrency:
 jobs:
   lint_and_template:
     name: Helm Lint + Template
-    runs-on: 
-      - self-hosted
-      - Linux
-      - X64
-      - org-build
-      - org-deploy
+    runs-on: [self-hosted, Linux, X64, org-build]
+
 
     env:
       HELM_VERSION: "v3.15.4"
